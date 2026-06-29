@@ -18,7 +18,7 @@ class ApplicationStatus(str, Enum):
 
 @dataclass
 class Job:
-    """A job listing."""
+    """A normalized job listing from any provider."""
     title: str
     company: str
     location: str = ""
@@ -28,7 +28,9 @@ class Job:
     salary_max: Optional[int] = None
     remote: bool = False
     posted_date: Optional[date] = None
-    source: str = ""  # e.g., "LinkedIn", "Indeed", "company_site"
+    source: str = ""          # e.g., "Indeed", "LinkedIn", "Greenhouse", "Lever"
+    external_id: str = ""     # provider-specific stable ID when available
+    query: str = ""           # search query that produced this listing
 
 
 @dataclass
