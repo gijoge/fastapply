@@ -17,16 +17,40 @@ from fastapply.tracker import (
     create_application, get_all_applications, mark_applied,
     mark_interview, mark_rejected, get_summary_stats,
 )
-from fastapply.scraper import search_jobs
-from fastapply.db import init_db
+from fastapply.db import (
+    init_db,
+    list_discovered_jobs,
+    run_daily_discovery,
+    get_latest_discovery_run,
+)
 
 console = Console()
+
+
+def _auto_discover_jobs() -> None:
+    """Run job discovery automatically at most once per day."""
+    try:
+        result = run_daily_discovery()
+        if result.get("skipped"):
+            return
+
+        inserted = result.get("inserted", 0)
+        updated = result.get("updated", 0)
+        seen = result.get("seen", 0)
+
+        console.print(
+            f"[cyan]Auto-discovery complete:[/cyan] "
+            f"{inserted} new, {updated} updated, {seen} unchanged jobs."
+        )
+    except Exception as e:
+        console.print(f"[yellow]Auto-discovery warning:[/yellow] {e}")
 
 
 @click.group()
 def cli():
     """FastApply — AI-powered job application automation."""
     init_db()
+    _auto_discover_jobs()
 
 
 # ── ATS Scoring ──────────────────────────────────────────────────────────────
@@ -109,132 +133,137 @@ def tailor(jd: str, company: str, title: str):
 def apply(company: str, title: str, url: str, notes: str):
     """Add an application to your tracker."""
     app_id = create_application(company, title, url=url, status="applied", notes=notes)
-    console.print(f"[green]✓ Application #{app_id} added: {title} @ {company}[/green]")
+    console.print(f"[green]Tracked application #{app_id}: {title} @ {company}[/green]")
 
 
-@cli.command(name="save")
+@cli.command(name="save-job")
 @click.option("--company", required=True)
 @click.option("--title", required=True)
 @click.option("--url", default="")
-def save_job(company: str, title: str, url: str):
-    """Save a job to apply later."""
-    app_id = create_application(company, title, url=url, status="saved")
-    console.print(f"[blue]✓ Saved #{app_id}: {title} @ {company}[/blue]")
+@click.option("--notes", default="")
+def save_job(company: str, title: str, url: str, notes: str):
+    """Save a job to your tracker without marking it applied."""
+    app_id = create_application(company, title, url=url, status="saved", notes=notes)
+    console.print(f"[green]Saved job #{app_id}: {title} @ {company}[/green]")
 
 
 @cli.command(name="list")
-@click.option("--status", default=None, help="Filter by status (saved/applied/interview/etc.)")
-def list_apps(status: Optional[str]):
-    """List all tracked applications."""
-    apps = get_all_applications(status=status)
-
-    if not apps:
-        console.print("[yellow]No applications found.[/yellow]")
-        return
-
-    table = Table(title="Applications", show_lines=True)
-    table.add_column("ID", style="dim", width=4)
+@click.option("--status", default=None, help="Filter by status")
+def list_cmd(status: Optional[str]):
+    """List tracked applications."""
+    rows = get_all_applications(status=status)
+    table = Table(title="Tracked Applications")
+    table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Company", style="bold")
     table.add_column("Title")
     table.add_column("Status")
-    table.add_column("ATS%", justify="right")
-    table.add_column("Notes", max_width=30)
+    table.add_column("Applied")
+    table.add_column("ATS")
 
-    status_colors = {
-        "saved": "blue", "applied": "green", "phone_screen": "cyan",
-        "interview": "yellow", "offer": "bold green", "rejected": "red",
-    }
-
-    for app in apps:
-        color = status_colors.get(app.status, "white")
+    for row in rows:
         table.add_row(
-            str(app.id),
-            app.company,
-            app.title,
-            f"[{color}]{app.status}[/{color}]",
-            f"{app.ats_score:.0f}" if app.ats_score else "—",
-            (app.notes[:40] + "...") if app.notes and len(app.notes) > 40 else (app.notes or "—"),
+            str(row.id),
+            row.company,
+            row.title,
+            row.status,
+            str(row.applied_date or ""),
+            f"{row.ats_score:.1f}" if row.ats_score is not None else "",
         )
 
     console.print(table)
 
 
-@cli.command(name="stats")
-def stats():
-    """Show application pipeline statistics."""
-    s = get_summary_stats()
-    console.print(Panel(
-        f"[bold]Total:[/bold] {s.get('total', 0)}\n"
-        f"[blue]Saved:[/blue] {s.get('saved', 0)}  "
-        f"[green]Applied:[/green] {s.get('applied', 0)}  "
-        f"[yellow]Interview:[/yellow] {s.get('interview', 0)}  "
-        f"[bold green]Offer:[/bold green] {s.get('offer', 0)}  "
-        f"[red]Rejected:[/red] {s.get('rejected', 0)}",
-        title="Application Pipeline",
-        border_style="cyan",
-    ))
+@cli.command(name="jobs")
+@click.option("--status", default=None, help="Filter discovered jobs by status")
+@click.option("--limit", default=50, help="Max discovered jobs to show")
+def jobs_cmd(status: Optional[str], limit: int):
+    """List automatically discovered jobs from SQLite."""
+    rows = list_discovered_jobs(status=status, limit=limit)
+
+    table = Table(title="Discovered Jobs")
+    table.add_column("ID", style="cyan", no_wrap=True)
+    table.add_column("Source")
+    table.add_column("Company", style="bold")
+    table.add_column("Title")
+    table.add_column("Location")
+    table.add_column("Status")
+    table.add_column("URL")
+
+    for row in rows:
+        table.add_row(
+            str(row.id),
+            row.source,
+            row.company,
+            row.title,
+            row.location,
+            row.status,
+            row.url,
+        )
+
+    console.print(table)
 
 
-@cli.command(name="update")
+@cli.command(name="mark-applied")
 @click.argument("app_id", type=int)
-@click.argument("status", type=click.Choice(
-    ["saved", "applied", "phone_screen", "interview", "offer", "rejected", "withdrawn"]
-))
-@click.option("--notes", default="", help="Optional notes")
-def update(app_id: int, status: str, notes: str):
-    """Update application status."""
-    from fastapply.db import update_status
-    ok = update_status(app_id, status, notes)
+@click.option("--notes", default="")
+def mark_applied_cmd(app_id: int, notes: str):
+    """Mark an application as applied."""
+    ok = mark_applied(app_id, notes=notes)
     if ok:
-        console.print(f"[green]✓ Application #{app_id} → {status}[/green]")
+        console.print(f"[green]Application #{app_id} marked as applied.[/green]")
     else:
         console.print(f"[red]Application #{app_id} not found.[/red]")
 
 
-# ── Job Search ────────────────────────────────────────────────────────────────
+@cli.command(name="mark-interview")
+@click.argument("app_id", type=int)
+@click.option("--notes", default="")
+def mark_interview_cmd(app_id: int, notes: str):
+    """Mark an application as interview stage."""
+    ok = mark_interview(app_id, notes=notes)
+    if ok:
+        console.print(f"[green]Application #{app_id} marked as interview.[/green]")
+    else:
+        console.print(f"[red]Application #{app_id} not found.[/red]")
 
-@cli.command(name="search")
-@click.argument("query")
-@click.option("--location", default="Minneapolis, MN")
-@click.option("--max", "max_results", default=15, type=int)
-def search(query: str, location: str, max_results: int):
-    """Search for job listings."""
-    with console.status(f"Searching for '{query}' in {location}..."):
-        jobs = search_jobs(query, location, max_results=max_results)
 
-    if not jobs:
-        console.print("[yellow]No jobs found.[/yellow]")
-        return
+@cli.command(name="mark-rejected")
+@click.argument("app_id", type=int)
+@click.option("--notes", default="")
+def mark_rejected_cmd(app_id: int, notes: str):
+    """Mark an application as rejected."""
+    ok = mark_rejected(app_id, notes=notes)
+    if ok:
+        console.print(f"[green]Application #{app_id} marked as rejected.[/green]")
+    else:
+        console.print(f"[red]Application #{app_id} not found.[/red]")
 
-    table = Table(title=f"Results: {query} in {location}", show_lines=True)
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Title", style="bold")
-    table.add_column("Company")
-    table.add_column("Location")
-    table.add_column("Source")
-    table.add_column("URL", max_width=40)
 
-    for i, job in enumerate(jobs, 1):
-        table.add_row(
-            str(i), job.title, job.company, job.location, job.source,
-            job.url[:40] + "..." if len(job.url) > 40 else job.url,
+@cli.command(name="stats")
+def stats_cmd():
+    """Show summary stats."""
+    stats = get_summary_stats()
+    latest_run = get_latest_discovery_run()
+
+    lines = [
+        f"Applications total: {stats.get('total', 0)}",
+        f"Saved: {stats.get('saved', 0)}",
+        f"Applied: {stats.get('applied', 0)}",
+        f"Interview: {stats.get('interview', 0)}",
+        f"Offer: {stats.get('offer', 0)}",
+        f"Rejected: {stats.get('rejected', 0)}",
+        f"Discovered jobs total: {stats.get('discovered_jobs_total', 0)}",
+        f"Discovered jobs new: {stats.get('discovered_jobs_new', 0)}",
+        f"Discovered jobs applied: {stats.get('discovered_jobs_applied', 0)}",
+    ]
+
+    if latest_run:
+        lines.append(
+            f"Latest discovery run: {latest_run.status} on {latest_run.run_date} "
+            f"({latest_run.inserted_count} new, {latest_run.updated_count} updated)"
         )
 
-    console.print(table)
-
-
-# ── Follow-Up Email ───────────────────────────────────────────────────────────
-
-@cli.command(name="followup")
-@click.option("--company", required=True)
-@click.option("--title", required=True)
-@click.option("--date", "applied_date", required=True, help="Date applied (YYYY-MM-DD)")
-@click.option("--contact", default="Hiring Manager")
-def followup(company: str, title: str, applied_date: str, contact: str):
-    """Generate a follow-up email."""
-    with console.status("Generating follow-up..."):
-        email = generate_followup_email(company, title, applied_date, contact)
-    console.print(Panel(email, title=f"Follow-up: {title} @ {company}", border_style="cyan"))
+    console.print(Panel("\n".join(lines), title="FastApply Stats", border_style="green"))
 
 
 if __name__ == "__main__":
