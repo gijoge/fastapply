@@ -43,6 +43,22 @@ def _safe_str(value) -> str:
     return "" if value is None else str(value)
 
 
+def _render_discovery_trigger(button_key: str = "run_discovery") -> None:
+    """Render a manual discovery trigger with immediate page refresh."""
+    if st.button("Run discovery now", key=button_key):
+        with st.spinner("Running discovery..."):
+            try:
+                result = run_daily_discovery(force=True)
+                st.success(
+                    f"Discovery complete: {result.get('inserted', 0)} new, "
+                    f"{result.get('updated', 0)} updated, "
+                    f"{result.get('seen', 0)} unchanged."
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Discovery failed: {e}")
+
+
 def _render_overview():
     st.title("FastApply Overview")
     st.caption("Tracked applications and automatically discovered jobs")
@@ -62,6 +78,8 @@ def _render_overview():
             f"Latest discovery run: {latest_run.status} on {latest_run.run_date} "
             f"({latest_run.inserted_count} new, {latest_run.updated_count} updated, {latest_run.seen_count} unchanged)"
         )
+
+    _render_discovery_trigger("overview_discovery_button")
 
     st.subheader("Application Funnel")
     funnel_data = pd.DataFrame({
@@ -270,17 +288,7 @@ def _render_discovered_jobs():
     top1, top2 = st.columns([1, 1])
 
     with top1:
-        if st.button("Run discovery now"):
-            with st.spinner("Running discovery..."):
-                try:
-                    result = run_daily_discovery(force=True)
-                    st.success(
-                        f"Discovery complete: {result.get('inserted', 0)} new, "
-                        f"{result.get('updated', 0)} updated, "
-                        f"{result.get('seen', 0)} unchanged."
-                    )
-                except Exception as e:
-                    st.error(f"Discovery failed: {e}")
+        _render_discovery_trigger("discovered_jobs_button")
 
     with top2:
         latest_run = get_latest_discovery_run()
@@ -352,6 +360,7 @@ def _render_discovered_jobs():
         ok = mark_discovered_job_status(selected_job_id, new_status)
         if ok:
             st.success(f"Discovered job #{selected_job_id} updated to '{new_status}'.")
+            st.rerun()
         else:
             st.error("Could not update discovered job.")
 
